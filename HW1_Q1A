@@ -1,0 +1,123 @@
+import matplotlib.pyplot as plt # For general plotting
+import math
+import numpy as np
+from scipy.stats import multivariate_normal # MVN not univariate
+from sklearn.metrics import confusion_matrix
+np.set_printoptions(suppress=True)
+
+# Set seed to generate reproducible "pseudo-randomness
+np.random.seed(7)
+
+plt.rc('font', size=22)          # controls default text sizes
+plt.rc('axes', titlesize=18)     # fontsize of the axes title
+plt.rc('axes', labelsize=18)    # fontsize of the x and y labels
+plt.rc('xtick', labelsize=14)    # fontsize of the tick labels
+plt.rc('ytick', labelsize=14)    # fontsize of the tick labels
+plt.rc('legend', fontsize=18)    # legend fontsize
+plt.rc('figure', titlesize=22)  # fontsize of the figure title
+
+N = 10000 # Number of samples to draw from each distribution
+
+# Likelihood of each distribution to be selected AND class priors!!! P(L=0) = 0.65 and P(L=1) = 0.65
+priors = np.array([0.65, 0.35]) 
+
+# Determine number of classes/mixture components
+C = len(priors) #length of prior distr (=2)
+
+# Mean and covariance of data pdfs conditioned on labels
+mu = np.array([[-0.5, -0.5, -0.5],
+               [1, 1, 1]])  # Gaussian distributions means
+Sigma = np.array([[[1, -0.5, 0.3],
+                   [-0.5, 1, -0.5],
+                   [0.3, -0.5, 1 ]],
+                  [[1, 0.3, -0.2],
+                   [0.3, 1, 0.3],
+                   [-0.2, 0.3, 1]]])  # Gaussian distributions covariance matrices
+
+# Determine dimensionality from mixture PDF parameters
+n = mu.shape[1] #size of mean array (=3)
+
+# Output samples and labels
+X = np.zeros([N, n]) #0 array - 10000 x 3
+y = np.zeros(N) #0 array - 10000 x 1
+
+# Decide randomly which samples will come from each component (taking class 1 from standard normal values above 0.65)
+labels = np.random.rand(N) >= priors[0] #labels of classification - TFTFFTTTF...
+L = np.array(range(C)) #0,1 array
+Nl = np.array([sum(labels == l) for l in L]) #how many class 0, class 1
+
+# Draw samples from each class pdf - draw random variables from multivariate normal distr
+X = np.zeros((N, n))
+X[labels == 0, :] =  multivariate_normal.rvs(mu[0], Sigma[0], Nl[0]) 
+X[labels == 1, :] =  multivariate_normal.rvs(mu[1], Sigma[1], Nl[1]) #10000,3
+
+# MAP classifier (is a special case of ERM corresponding to 0-1 loss)
+Lambda = np.ones((C, C)) - np.identity(C)
+
+# ERM Classifier (using true model parameters)
+# Using log-likelihood-ratio as the discriminant score for ERM
+class_conditional_likelihoods = np.array([multivariate_normal.pdf(X, mu[l], Sigma[l]) for l in L]) #2x10000
+discriminant_score_erm = np.log(class_conditional_likelihoods[1]) - np.log(class_conditional_likelihoods[0]) #10000
+
+# Gamma threshold for MAP decision rule (remove Lambdas and you obtain same gamma on priors only; 0-1 loss simplification)
+gamma_map = (Lambda[1,0] - Lambda[0,0]) / (Lambda[0,1] - Lambda[1,1]) * priors[0]/priors[1]
+print("THEORETICAL Threshold Gamma Value:", gamma_map)
+
+decisions_map = discriminant_score_erm >= np.log(gamma_map)
+# False Positive Probability
+ind_10_map = np.argwhere((decisions_map==1) & (labels==0))
+p_10_map = len(ind_10_map) / Nl[0]
+# True Positive Probability
+ind_11_map = np.argwhere((decisions_map==1) & (labels==1))
+p_11_map = len(ind_11_map) / Nl[1]
+
+##########################
+from sys import float_info # Threshold smallest positive floating value
+# Generate ROC curve samples
+def estimate_roc(discriminant_score, label):
+    Nlabels = np.array((sum(label == 0), sum(label == 1)))
+
+    sorted_score = sorted(discriminant_score)
+
+    # Use tau values that will account for every possible classification split
+    taus = ([sorted_score[0] - float_info.epsilon] + 
+             sorted_score +
+             [sorted_score[-1] + float_info.epsilon])
+
+    # Calculate the decision label for each observation for each gamma
+    decisions = [discriminant_score >= t for t in taus]
+
+    ind10 = [np.argwhere((d==1) & (label==0)) for d in decisions]
+    p10 = [len(inds)/Nlabels[0] for inds in ind10]
+    ind11 = [np.argwhere((d==1) & (label==1)) for d in decisions]
+    p11 = [len(inds)/Nlabels[1] for inds in ind11]
+
+    # ROC has FPR on the x-axis and TPR on the y-axis
+    roc = np.array((p10, p11))
+
+    return roc, taus, sorted_score
+##############################
+
+# Construct the ROC for ERM by changing log(gamma)
+roc_erm, _, discrim_sorted = estimate_roc(discriminant_score_erm, labels) #2x10002 - TP and FPs of each data point
+roc_map = np.array((p_10_map, p_11_map)) #2 - FP and TP point
+
+# ROC returns FPR vs TPR, but prob error needs FNR so take 1-TPR
+prob_error = np.array((roc_erm[0,:], 1 - roc_erm[1,:])).T.dot(Nl.T / N)
+gamma_est_ind = np.argmin(prob_error) #6677
+gamma_est = math.exp(discrim_sorted[gamma_est_ind])
+print("ESTIMATED Threshold Gamma Value:", gamma_est)
+min_prob_error_est = np.min(prob_error)
+print("ESTIMATED Minimum Probability Error:", min_prob_error_est)
+
+fig_roc, ax_roc = plt.subplots(figsize=(10, 10))
+ax_roc.plot(roc_erm[0], roc_erm[1])
+ax_roc.plot(roc_map[0], roc_map[1], 'rx', label="Theoretical Min. Prob. Error:", markersize=16)
+#print("FP Prob. at THEORETICAL Threshold Gamma", roc_map[0])
+#print("TP Prob. at THEORETICAL Threshold Gamma", roc_map[1])
+ax_roc.legend()
+ax_roc.set_xlabel(r"Probability of false alarm $P(D=1|L=0)$")
+ax_roc.set_ylabel(r"Probability of correct decision $P(D=1|L=1)$")
+plt.grid(True)
+
+fig_roc;
