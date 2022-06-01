@@ -1,0 +1,58 @@
+import matplotlib.pyplot as plt # For general plotting
+import math
+import numpy as np
+import csv
+from scipy.stats import multivariate_normal # MVN not univariate
+from sklearn.metrics import confusion_matrix
+from scipy import linalg
+from csv import reader
+import csv
+np.set_printoptions(suppress=True)
+
+CSVData = open("winequality-white.csv")
+data_with_class = np.genfromtxt(CSVData, delimiter=";")
+data_with_class = np.delete(data_with_class, 0, 0) #the data which includes the class (wine rating) in the last column
+
+labels = data_with_class[:,11] #Wine Rating
+data = np.delete(data_with_class, 11, 1) #Each row is sample and each col is feature
+feature = ["fixed acidity","volatile acidity","citric acid","residual sugar","chlorides","free sulfur dioxide","total sulfur dioxide","density","pH","sulphates","alcohol","quality"]
+
+################################
+L, col = data.shape #L is 4898, col = 11 in this case
+num_class = 11 #0-10 rating
+Nl = np.array([sum(labels == l) for l in range(col)]) #gets number of samples from each class
+priors = Nl/L #frequency of each class
+C = len(priors)
+
+#finding mean array
+mu = np.zeros([num_class, col]) #11 x 11 matrix (average value for EACH class and each feature)
+for l in range(col): #iterate for each label/class (0-10)
+    index = np.argwhere(labels==l)
+    ind_row, ind_col = index.shape
+    for j in index: #ierate through every index where that class exists (for example, rating=3 happens at 22,55,77,646,2352)
+        mu[l,:] += data[ind_row,:]
+    if Nl[l]>0: #once all values are added to mu from THAT class, it's divided by count to find avg
+        mu[l,:] /= Nl[l]
+
+#Computing Covariance Matrix and Regularizing
+Sigma = np.cov(mu)
+alpha = 0.1
+Lambda = alpha*np.trace(Sigma)/np.linalg.matrix_rank(Sigma)
+Sigma = Sigma + Lambda*np.identity(col)
+print(Sigma)
+
+# Min prob. of error classifier
+class_cond_likelihoods = np.array([multivariate_normal.pdf(data, mu[c], Sigma[c]) for c in range(C)])
+class_priors = np.diag(priors)
+class_posteriors = class_priors.dot(class_cond_likelihoods)
+decisions = np.argmax(class_posteriors, axis=0) + np.ones(N) 
+
+# Simply using sklearn confusion matrix
+print("Confusion Matrix (rows: Predicted class, columns: True class):")
+conf_mat = confusion_matrix(decisions, labels)
+print(conf_mat)
+correct_class_samples = np.sum(np.diag(conf_mat))
+print("Total Mumber of Misclassified Samples: {:d}".format(N - correct_class_samples))
+
+prob_error = 1 - (correct_class_samples / N)
+print("Empirically Estimated Probability of Error: {:.4f}".format(prob_error))
