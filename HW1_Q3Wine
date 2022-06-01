@@ -35,7 +35,7 @@ for l in range(col): #iterate for each label/class (0-10)
         mu[l,:] /= Nl[l]
 
 #Computing Covariance Matrix and Regularizing
-Sigma = np.cov(mu)
+Sigma = np.cov(mu.T)
 alpha = 0.1
 Lambda = alpha*np.trace(Sigma)/np.linalg.matrix_rank(Sigma)
 Sigma = Sigma + Lambda*np.identity(col)
@@ -45,22 +45,22 @@ print(Sigma)
 class_cond_likelihoods = np.array([multivariate_normal.pdf(data, mu[c], Sigma[c]) for c in range(C)])
 class_priors = np.diag(priors)
 class_posteriors = class_priors.dot(class_cond_likelihoods)
-decisions = np.argmax(class_posteriors, axis=0) + np.ones(N) 
+decisions = np.argmax(class_posteriors, axis=0) + np.ones(L) 
 
 # Simply using sklearn confusion matrix
 print("Confusion Matrix (rows: Predicted class, columns: True class):")
 conf_mat = confusion_matrix(decisions, labels)
 print(conf_mat)
 correct_class_samples = np.sum(np.diag(conf_mat))
-print("Total Mumber of Misclassified Samples: {:d}".format(N - correct_class_samples))
+print("Total Mumber of Misclassified Samples: {:d}".format(L - correct_class_samples))
 
-prob_error = 1 - (correct_class_samples / N)
+prob_error = 1 - (correct_class_samples / L)
 print("Empirically Estimated Probability of Error: {:.4f}".format(prob_error))
 
 #2-D Projections of features
 fig = plt.figure(figsize=(10, 10))
-for r in 2: # First 2 feature options
-    for c in L: # Each class label
+for r in range(2): # First 2 feature options
+    for c in num_class: # Each class label
         ind_rc = np.argwhere((decisions==r) & (labels==c))
         # Decision = Marker Shape; True Labels = Marker Color
         marker = marker_shapes[r-1] + marker_colors[c-1]
