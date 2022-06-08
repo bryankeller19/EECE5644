@@ -57,16 +57,16 @@ def hw2q2():
     #Adds a prior (regularization term) to tackle overfitting to MLE
     #test with gamma values 10e-4 to 10e4
     minimum = 1e10
-    sigma = np.linspace(10e-4, 10e4, num=10e4)
-    print(sigma)
-    for l in range(sigma):
+    sigma = np.linspace(1, 10e4, num=100)
+    for l in sigma:
         map_model = minimize(nll_loss, theta0, args=(xTrain, y, l), tol=1e-6)
         theta_map = map_model.x # Writing this out explicitly for readers, MAP estimate of parameters
         nll_preds_map = xTrain.dot(theta_map) # Using parameters obtained from MAP estimate
         y_predicted_map = xValidate.dot(theta_map)
         L_mse_map = (1/Nvalid)*(xValidate.dot(theta_map)-yValidate).T.dot(xValidate.dot(theta_map)-yValidate)
         if L_mse_map < minimum:
-            L_mse_map = minimum
+            minimum = L_mse_map
+            ideal_sigma = l
     
     
     
@@ -75,7 +75,8 @@ def hw2q2():
     #L_mse_map = (1/Nvalid)*(xValidate.dot(theta_map)-yValidate).T.dot(xValidate.dot(theta_map)-yValidate)
     
     print(L_mse_mle)
-    #print(L_mse_map)
+    print(minimum) #L_mse_map
+    print(ideal_sigma)
     
     
     return xTrain, yTrain, xValidate, yValidate
