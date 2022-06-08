@@ -1,0 +1,160 @@
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.optimize import minimize
+from scipy.stats import multivariate_normal
+np.set_printoptions(suppress=True)
+np.random.seed(7)
+
+plt.rc('font', size=22)          # controls default text sizes
+plt.rc('axes', titlesize=18)     # fontsize of the axes title
+plt.rc('axes', labelsize=18)     # fontsize of the x and y labels
+plt.rc('xtick', labelsize=14)    # fontsize of the tick labels
+plt.rc('ytick', labelsize=14)    # fontsize of the tick labels
+plt.rc('legend', fontsize=16)    # legend fontsize
+plt.rc('figure', titlesize=22)   # fontsize of the figure title
+
+##############################################################################################################
+def hw2q2():
+    Ntrain = 100
+    data = generateData(Ntrain) #100x3
+    #plot3(data[:, 0], data[:, 1], data[:, 2], name="Training")
+    xTrain = data[:, 0:2] #100x2 -x values
+    xTrain = np.column_stack((np.ones(Ntrain), xTrain))  #100x3 Prepend column of ones to create augmented inputs x tilde
+    yTrain = data[:, 2] #100x1 -labels
+    
+    Nvalid = 1000
+    data = generateData(Nvalid) #1000x3
+    #plot3(data[:, 0], data[:, 1], data[:, 2], name="Validation")
+    xValidate = data[:, 0:2] #1000x2
+    xValidate = np.column_stack((np.ones(Nvalid), xValidate))
+    yValidate = data[:, 2] #1000x1 
+    
+    ############ MAX LIKELIHOOD ESTIMATOR ############
+    #same as minimizing NLL
+    theta0 = np.random.randn(xTrain.shape[1]) #Random initialization (3x1)
+    y = yTrain
+   
+    # Minimize NLL instead, assuming covariance of matrix of gamma*identity
+    sigma = 1
+    mle_model = minimize(nll_loss, theta0, args=(xTrain, y, sigma), tol=1e-6)
+    theta_mle = mle_model.x # Writing this out explicitly for readers, ML estimate of parameters
+    print(theta_mle)
+    nll_preds = xTrain.dot(theta_mle) # Using parameters obtained from MLE estimate
+
+    # Predictions with our MLE theta
+    y_predicted_mle = xValidate.dot(theta_mle)
+
+    # Plot the learned regression line on our original scatter plot AND the new unseen data
+    fig, ax_valid = plt.subplots(figsize=(10, 10))
+    ax_valid = fig.add_subplot(projection='3d')
+    ax_valid.scatter(xValidate[:, 0],xValidate[:, 1], y_predicted_mle, color='magenta', label="MLE Predicted")
+    ax_valid.scatter(xValidate[:, 0],xValidate[:, 1], yValidate, color='orange', label="True Line")
+    ax_valid.legend()
+    
+    
+    ############ MAP ESTIMATOR ############
+    #assume theta has a zero-mean Gaussian prior
+    #Adds a prior (regularization term) to tackle overfitting to MLE
+    #test with gamma values 10e-4 to 10e4
+    minimum = 1e10
+    sigma = np.linspace(10e-4, 10e4, num=10e4)
+    print(sigma)
+    for l in range(sigma):
+        map_model = minimize(nll_loss, theta0, args=(xTrain, y, l), tol=1e-6)
+        theta_map = map_model.x # Writing this out explicitly for readers, MAP estimate of parameters
+        nll_preds_map = xTrain.dot(theta_map) # Using parameters obtained from MAP estimate
+        y_predicted_map = xValidate.dot(theta_map)
+        L_mse_map = (1/Nvalid)*(xValidate.dot(theta_map)-yValidate).T.dot(xValidate.dot(theta_map)-yValidate)
+        if L_mse_map < minimum:
+            L_mse_map = minimum
+    
+    
+    
+    ############ AVERAGE-SQUARE ERROR OF MLE and MAP ############
+    L_mse_mle = (1/Nvalid)*(xValidate.dot(theta_mle)-yValidate).T.dot(xValidate.dot(theta_mle)-yValidate)
+    #L_mse_map = (1/Nvalid)*(xValidate.dot(theta_map)-yValidate).T.dot(xValidate.dot(theta_map)-yValidate)
+    
+    print(L_mse_mle)
+    #print(L_mse_map)
+    
+    
+    return xTrain, yTrain, xValidate, yValidate
+
+
+##############################################################################################################
+################################################# FUNCTIONS #################################################
+##############################################################################################################
+def generateData(N):
+    gmmParameters = {}
+    gmmParameters['priors'] = [.3, .4, .3]  # priors should be a row vector
+    gmmParameters['meanVectors'] = np.array([[-10, 0, 10], [0, 0, 0], [10, 0, -10]])
+    gmmParameters['covMatrices'] = np.zeros((3, 3, 3))
+    gmmParameters['covMatrices'][:, :, 0] = np.array([[1, 0, -3], [0, 1, 0], [-3, 0, 15]])
+    gmmParameters['covMatrices'][:, :, 1] = np.array([[8, 0, 0], [0, .5, 0], [0, 0, .5]])
+    gmmParameters['covMatrices'][:, :, 2] = np.array([[1, 0, -3], [0, 1, 0], [-3, 0, 15]])
+    X = generateDataFromGMM(N, gmmParameters)
+    return X
+
+##############################################################################################################
+def generateDataFromGMM(N, gmmParameters):
+    #    Generates N vector samples from the specified mixture of Gaussians
+    #    Returns samples and their component labels
+    #    Data dimensionality is determined by the size of mu/Sigma parameters
+    priors = gmmParameters['priors']  # priors should be a row vector
+    meanVectors = gmmParameters['meanVectors']
+    covMatrices = gmmParameters['covMatrices']
+    n = meanVectors.shape[0]  # Data dimensionality
+    C = len(priors)  # Number of components
+    X = np.zeros((n, N))
+    labels = np.zeros((1, N))
+    # Decide randomly which samples will come from each component
+    u = np.random.random((1, N))
+    thresholds = np.zeros((1, C + 1))
+    thresholds[:, 0:C] = np.cumsum(priors)
+    thresholds[:, C] = 1
+    for l in range(C):
+        indl = np.where(u <= float(thresholds[:, l]))
+        Nl = len(indl[1])
+        labels[indl] = (l + 1) * 1
+        u[indl] = 1.1
+        X[:, indl[1]] = np.transpose(np.random.multivariate_normal(meanVectors[:, l], covMatrices[:, :, l], Nl))
+
+    # NOTE TRANPOSE TO GO TO SHAPE (N, n)
+    return X.transpose()
+
+##############################################################################################################
+def plot3(a, b, c, name="Training", mark="o", col="b"):
+    # Adjusts the aspect ratio and enlarges the figure (text does not enlarge)
+    fig = plt.figure()
+
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(a, b, c, marker=mark, color=col)
+    ax.set_xlabel(r"$x_1$")
+    ax.set_ylabel(r"$x_2$")
+    ax.set_zlabel(r"$y$")
+    plt.title("{} Dataset".format(name))
+    # To set the axes equal for a 3D plot
+    ax.set_box_aspect((np.ptp(a), np.ptp(b), np.ptp(c)))
+    plt.show()
+
+    
+##############################################################################################################    
+# Negative Log Likelihood (NLL) loss
+def nll_loss(parameters, X, y, sigma=1):
+    mu_pred = X.dot(parameters)
+    
+    # Compute log-likelihood function, setting mu=0 as we're estimating it
+    log_lld = np.sum(multivariate_normal.pdf(y - mu_pred, 0, sigma))
+    
+    # Return NLL
+    return -log_lld
+
+##############################################################################################################
+def analytical_solution(X, y):
+# Analytical solution is (X^T*X)^-1 * X^T * y 
+    return np.linalg.inv(X.T.dot(X)).dot(X.T).dot(y)
+
+##############################################################################################################
+if __name__ == '__main__':
+    hw2q2()
+    
