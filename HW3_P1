@@ -1,0 +1,341 @@
+#IMPORTS
+import matplotlib.pyplot as plt # For general plotting
+from sys import float_info  # Threshold smallest positive floating value
+import matplotlib.colors as mcol
+import numpy as np
+from numpy import linalg as la
+import pandas as pd
+from scipy.stats import multivariate_normal as mvn
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import confusion_matrix
+from sklearn import preprocessing
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchsummary import summary # Utility to visualize PyTorch network and shapes
+from sklearn.preprocessing import PolynomialFeatures # Important new include
+from sklearn.model_selection import KFold # Important new include
+np.set_printoptions(suppress=True)
+
+# Set seed to generate reproducible "pseudo-randomness" (handles scipy's "randomness" too)
+np.random.seed(7)
+torch.manual_seed(7)
+
+plt.rc('font', size=22)          # controls default text sizes
+plt.rc('axes', titlesize=18)     # fontsize of the axes title
+plt.rc('axes', labelsize=18)     # fontsize of the x and y labels
+plt.rc('xtick', labelsize=14)    # fontsize of the tick labels
+plt.rc('ytick', labelsize=14)    # fontsize of the tick labels
+plt.rc('legend', fontsize=16)    # legend fontsize
+plt.rc('figure', titlesize=22)   # fontsize of the figure title
+
+#FUNCTIONS
+###################################################################################################
+def generate_data_from_gmm(N, pdf_params):
+    # Determine dimensionality from mixture PDF parameters
+    n = pdf_params['m'].shape[1] #3 in P1
+    # Output samples and labels
+    X = np.zeros([N, n]) #100 x 3
+    labels = np.zeros(N) #100 x 1
+    
+    # Decide randomly which samples will come from each component
+    u = np.random.rand(N)
+    thresholds = np.cumsum(pdf_params['priors'])
+    thresholds = np.insert(thresholds, 0, 0) # For intervals of classes - 5 x 1 (0 0.25 0.5 0.75 1.)
+
+    L = np.array(range(1, len(pdf_params['priors'])+1)) #4 x 1
+    for l in L: #1,2,3,4
+        # Get randomly sampled indices for this component
+        indices = np.argwhere((thresholds[l-1] <= u) & (u <= thresholds[l]))[:, 0]
+        # No. of samples in this component
+        Nl = len(indices)  
+        labels[indices] = l * np.ones(Nl) - 1
+        X[indices, :] =  mvn.rvs(pdf_params['m'][l-1], pdf_params['C'][l-1], Nl)
+    
+    return X, labels
+
+###################################################################################################
+def plot_test(X, labels, N, C):
+    fig = plt.figure(figsize=(10, 10))
+    ax_raw = fig.add_subplot(111, projection='3d')
+    n = X.shape[1]
+    L = np.array(range(C))
+    N_per_l = np.array([sum(labels == l) for l in L])
+    ax_raw.scatter(X[labels == 0, 0], X[labels == 0, 1], X[labels == 0, 2], 'ro', label="Class 0")
+    ax_raw.scatter(X[labels == 1, 0], X[labels == 1, 1], X[labels == 1, 2], 'b*', label="Class 1")
+    ax_raw.scatter(X[labels == 2, 0], X[labels == 2, 1], X[labels == 2, 2], 'g^', label="Class 2")
+    ax_raw.scatter(X[labels == 3, 0], X[labels == 3, 1], X[labels == 3, 2], 'k', label="Class 3")
+    ax_raw.set_xlabel(r"$x_1$")
+    ax_raw.set_ylabel(r"$x_2$")
+    ax_raw.set_zlabel(r"$x_3$")
+    plt.title("Data and True Class Labels")
+    plt.legend()
+    plt.tight_layout()
+    
+###################################################################################################
+# ERM classification rule (min prob. of error classifier)
+def perform_erm_classification(X, Lambda, gmm_params, C):    
+    # Conditional likelihoods of each x given each class, shape (C, N)
+    C = np.array([0, 1, 2, 3])
+    class_cond_likelihoods = np.array([mvn.pdf(X, gmm_params['m'][c], gmm_params['C'][c]) for c in C])
+
+    # Take diag so we have (C, C) shape of priors with prior prob along diagonal
+    class_priors = np.diag(gmm_params['priors'])
+    # class_priors*likelihood with diagonal matrix creates a matrix of posterior probabilities
+    # with each class as a row and N columns for samples, e.g. row 1: [p(y1)p(x1|y1), ..., p(y1)p(xN|y1)]
+    class_posteriors = class_priors.dot(class_cond_likelihoods)
+
+    # Conditional risk matrix of size C x N with each class as a row and N columns for samples
+    risk_mat = Lambda.dot(class_posteriors)
+    
+    return np.argmin(risk_mat, axis=0)
+
+###################################################################################################
+def softmax(x):
+    # Numerically stable with large exponentials (log-sum-exp trick if you're curious)
+    exps = np.exp(x - x.max())
+    return exps / np.sum(exps, axis=0)   
+
+###################################################################################################
+class TwoLayerMLP(nn.Module):
+    # Two-layer MLP (not really a perceptron activation function...) network class
+    
+    def __init__(self, input_dim, hidden_dim, C):
+        super(TwoLayerMLP, self).__init__()
+        # Fully connected layer WX + b mapping from input_dim (n) -> hidden_layer_dim
+        self.input_fc = nn.Linear(input_dim, hidden_dim)
+        # Output layer again fully connected mapping from hidden_layer_dim -> outputs_dim (C)
+        self.output_fc = nn.Linear(hidden_dim, C)
+        # Log Softmax (faster and better than straight Softmax)
+        # dim=1 refers to the dimension along which the softmax operation is computed
+        # In this case computing probabilities across dim 1, i.e., along classes at output layer
+        self.log_softmax = nn.LogSoftmax(dim=1) 
+        
+    # Don't call this function directly!! 
+    # Simply pass input to model and forward(input) returns output, e.g. model(X)
+    def forward(self, X):
+        # X = [batch_size, input_dim (n)]
+        X = self.input_fc(X)
+        # Non-linear activation function, e.g. ReLU (default good choice)
+        # Could also choose F.softplus(x) for smooth-ReLU, empirically worse than ReLU
+        X = F.relu(X)
+        # X = [batch_size, hidden_dim]
+        # Connect to last layer and output 'logits'
+        X = self.output_fc(X)
+        # Squash logits to probabilities that sum up to 1
+        y = self.log_softmax(X)
+        return y
+    
+###################################################################################################
+def model_train(model, data, labels, criterion, optimizer, num_epochs=25):
+    # Apparently good practice to set this "flag" too before training
+    # Does things like make sure Dropout layers are active, gradients are updated, etc.
+    # Probably not a big deal for our toy network, but still worth developing good practice
+    model.train()
+    # Optimize the neural network
+    for epoch in range(num_epochs):
+        # These outputs represent the model's predicted probabilities for each class. 
+        outputs = model(data)
+        # Criterion computes the cross entropy loss between input and target
+        loss = criterion(outputs, labels)
+        # Set gradient buffers to zero explicitly before backprop
+        optimizer.zero_grad()
+        # Backward pass to compute the gradients through the network
+        loss.backward()
+        # GD step update
+        optimizer.step()
+        
+    return model
+
+###################################################################################################
+def model_predict(model, data):
+    # Similar idea to model.train(), set a flag to let network know your in "inference" mode
+    model.eval()
+    # Disabling gradient calculation is useful for inference, only forward pass!!
+    with torch.no_grad():
+        # Evaluate nn on test data and compare to true labels
+        predicted_labels = model(data)
+        # Back to numpy
+        predicted_labels = predicted_labels.detach().numpy()
+
+        return np.argmax(predicted_labels, 1)
+    
+###################################################################################################
+def kFoldTrain(percep, X_train, y_train, C):
+    
+    #Find certain parameters 
+    K = 10
+    n_percep = np.max(percep) # P perceptrons ("hyperparameters") to evaluate
+    prob_error_train = np.empty((n_percep, K)) # Allocate space for probability error train error array - percep * 10
+    mean_prob_err_per_fold = np.empty((n_percep))
+    # STEP 1: Partition the dataset into K approximately-equal-sized partitions
+    # Shuffles data before doing the division into folds (not necessary, but a good idea)
+     # Number of folds for CV
+    kf = KFold(n_splits=K, shuffle=True) 
+    
+    # STEP 2: Try number of perceptrons between 1-20 for the hidden layer
+    for per in percep:
+        k = 0
+        for train_indices, valid_indices in kf.split(X_train):
+            # Extract the training and validation sets from the K-fold split
+            X_train_k = X_train[train_indices]
+            y_train_k = y_train[train_indices]
+            X_valid_k = X_train[valid_indices]
+            y_valid_k = y_train[valid_indices]
+    
+            # Train model parameters
+            input_dim = X_train_k.shape[1]
+            model = TwoLayerMLP(input_dim, per, C)
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+            criterion = nn.CrossEntropyLoss()
+            X_tensor = torch.FloatTensor(X_train_k)
+            y_tensor = torch.LongTensor(y_train_k)
+            X_tensor_valid = torch.FloatTensor(X_valid_k) #what we're testing the model on
+            y_tensor_valid = torch.LongTensor(y_valid_k)
+            model = model_train(model, X_tensor, y_tensor, criterion, optimizer, num_epochs=100) # Trained model 
+            Z = model_predict(model, X_tensor_valid) #predictions resulting from the forward pass through the network
+            
+            #Record Probability Error for Training Data
+            N = y_tensor_valid.shape
+            conf_mat = confusion_matrix(Z, y_tensor_valid)
+            correct_class_samples = np.sum(np.diag(conf_mat))
+            prob_error_train[per-1, k] = 1 - (correct_class_samples / N)
+            k += 1
+        mean_prob_err_per_fold[per-1] = np.mean(prob_error_train[per-1,:])
+            
+    # STEP 3: Compute the lowest Error for that model
+    KF_min_err = np.min(mean_prob_err_per_fold)
+    num_perc = np.argmin(mean_prob_err_per_fold)
+    
+    return KF_min_err, num_perc
+
+###################################################################################################
+def trainData(X_test, y_test, X_train, y_train, per, C):
+    
+    # Train model parameters
+    input_dim = X_train.shape[1]
+    model = TwoLayerMLP(input_dim, per, C)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    criterion = nn.CrossEntropyLoss()
+    X_tensor = torch.FloatTensor(X_train)
+    y_tensor = torch.LongTensor(y_train)
+    X_tensor_test = torch.FloatTensor(X_test)
+    y_tensor_test = torch.LongTensor(y_test)
+    model = model_train(model, X_tensor, y_tensor, criterion, optimizer, num_epochs=100) # Trained model 
+    Z = model_predict(model, X_tensor_test) #predictions resulting from the forward pass through the network
+            
+    #Record Probability Error for Training Data
+    N = y_tensor_test.shape
+    conf_mat = confusion_matrix(Z, y_tensor_test)
+    correct_class_samples = np.sum(np.diag(conf_mat))
+    error = 1 - (correct_class_samples / N)
+    
+    return error
+    
+###################################################################################################
+################################ Data Distribution / Generate Data ################################
+gmm_pdf = {}
+gmm_pdf['priors'] = np.array([0.25, 0.25, 0.25, 0.25]) #uniform priors
+C = len(gmm_pdf['priors']) #4 classes
+gmm_pdf['m'] = np.array([[-1, -2, 2.4],
+               [0.5, 3.6, -1.9],
+               [0, 1.2, 0.2],
+               [3.3, -5.1, 4.2]])
+
+gmm_pdf['C'] = np.array([1*np.eye(3), 2*np.eye(3), 3*np.eye(3), 4*np.eye(3)])
+
+#Generating Training Samples for N = 100, 200, 500, 1000, 2000, 5000 AND Test Sample for N = 100000
+N_test = 100000 # Number of test samples for experiments
+
+X_100, labels_100 = generate_data_from_gmm(100, gmm_pdf)
+X_200, labels_200 = generate_data_from_gmm(200, gmm_pdf)
+X_500, labels_500 = generate_data_from_gmm(500, gmm_pdf)
+X_1k, labels_1k = generate_data_from_gmm(1000, gmm_pdf)
+X_2k, labels_2k = generate_data_from_gmm(2000, gmm_pdf)
+X_5k, labels_5k = generate_data_from_gmm(5000, gmm_pdf)
+X_test, labels_test = generate_data_from_gmm(N_test, gmm_pdf)
+
+Ny_test = np.array((sum(labels_test == 0), sum(labels_test == 1), sum(labels_test == 2), sum(labels_test == 3)))
+##print("Label counts for test set: ", Ny_test)
+##plot_test(X_test, labels_test, N_test, C) # Plot the original data and their true labels for test data set
+
+##########################################################################################################
+########################## Data Distribution / Theoretically Optimal Classifier ##########################
+Lambda = np.ones((C, C)) - np.eye(C)
+decisions = perform_erm_classification(X_test, Lambda, gmm_pdf, C)
+conf_mat = confusion_matrix(decisions, labels_test)
+##print(conf_mat)
+correct_class_samples = np.sum(np.diag(conf_mat))
+prob_error = 1 - (correct_class_samples / N_test)
+##print("Empirically Estimated Probability of Error: {:.4f}".format(prob_error))
+
+#########################################################################################################
+################################# MLP Structure / Model Order Selection #################################
+# Use a 2-layer MLP (one hidden layer of perceptrons) that has P perceptrons
+#in the first (hidden) layer with smooth-ramp style activation functions (e.g., Smooth-ReLU, ELU, etc)
+#At the second/output layer use a softmax function to ensure all outputs are positive and
+#add up to 1. The best number of perceptrons for your custom problem will be selected using cross-validation.
+
+#For each of the training sets with different number of samples,
+#perform 10-fold cross-validation, using minimum classification error probability as the objective
+#function, to select the best number of perceptrons (that is justified by available training data)
+# Use default optimizer, regularization settings, infers that it's a multiclass problem etc
+
+perceptrons = np.arange(1, 20, 1) #array 1-20 in order
+KF_min_err_100, num_perc_100 = kFoldTrain(perceptrons, X_100, labels_100, C)
+KF_min_err_200, num_perc_200 = kFoldTrain(perceptrons, X_200, labels_200, C)
+KF_min_err_500, num_perc_500 = kFoldTrain(perceptrons, X_500, labels_500, C)
+KF_min_err_1k, num_perc_1k = kFoldTrain(perceptrons, X_1k, labels_1k, C)
+KF_min_err_2k, num_perc_2k = kFoldTrain(perceptrons, X_2k, labels_2k, C)
+KF_min_err_5k, num_perc_5k = kFoldTrain(perceptrons, X_5k, labels_5k, C)
+
+print("The best number of perceptrons for N = 100: {}".format(num_perc_100))
+print("The probability of error for N = 100 on the validation set: {}".format(KF_min_err_100))
+print("The best number of perceptrons for N = 200: {}".format(num_perc_200))
+print("The probability of error for N = 200 on the validation set: {}".format(KF_min_err_200))
+print("The best number of perceptrons for N = 500: {}".format(num_perc_500))
+print("The probability of error for N = 500 on the validation set: {}".format(KF_min_err_500))
+print("The best number of perceptrons for N = 1000: {}".format(num_perc_1k))
+print("The probability of error for N = 1000 on the validation set: {}".format(KF_min_err_1k))
+print("The best number of perceptrons for N = 2000: {}".format(num_perc_2k))
+print("The probability of error for N = 2000 on the validation set: {}".format(KF_min_err_2k))
+print("The best number of perceptrons for N = 5000: {}".format(num_perc_5k))
+print("The probability of error for N = 5000 on the validation set: {}".format(KF_min_err_5k))
+
+#########################################################################################################
+################################# Model Training / Performance Assessment ###############################
+test_err_100 = trainData(X_test,labels_test,X_100,labels_100,num_perc_100,C)
+test_err_200 = trainData(X_test,labels_test,X_200,labels_200,num_perc_200,C)
+test_err_500 = trainData(X_test,labels_test,X_500,labels_500,num_perc_500,C)
+test_err_1k = trainData(X_test,labels_test,X_1k,labels_1k,num_perc_1k,C)
+test_err_2k = trainData(X_test,labels_test,X_2k,labels_2k,num_perc_2k,C)
+test_err_5k = trainData(X_test,labels_test,X_5k,labels_5k,num_perc_5k,C)
+print(" ")
+print("The probability of error of test set using N = 100 training data: {}".format(test_err_100))
+print("The probability of error of test set using N = 200 training data: {}".format(test_err_200))
+print("The probability of error of test set using N = 500 training data: {}".format(test_err_500))
+print("The probability of error of test set using N = 1000 training data: {}".format(test_err_1k))
+print("The probability of error of test set using N = 2000 training data: {}".format(test_err_2k))
+print("The probability of error of test set using N = 5000 training data: {}".format(test_err_5k))
+
+#########################################################################################################
+############################################# Report Process ############################################
+#show a plot of the empirically estimated testP(error) for each trained MLP versus number
+#of training samples used in optimizing it (with a semi-log plot, logarithmic scale on the x-axis),
+#as well as a horizontal line that runs across the plot indicating the empirically estimated test
+#P(error) for the theoretically optimal classifier.
+
+fig = plt.figure()
+plt.xscale('log')
+plt.plot(100, test_err_100, 'bx', label="N=100 Set")
+plt.plot(200, test_err_200, 'gp', label="N=200 Set")
+plt.plot(500, test_err_500, 'r^', label="N=500 Set")
+plt.plot(1000, test_err_1k, 'c.', label="N=1000 Set")
+plt.plot(2000, test_err_2k, 'md', label="N=2000 Set")
+plt.plot(5000, test_err_5k, 'y*', label="N=5000 Set")
+plt.axhline(y=prob_error, color='k', linestyle='-',label="Theoretically Optimal P error")
+plt.plot()
+plt.xlabel("Number of Training Samples")
+plt.ylabel("P error")
+plt.legend(bbox_to_anchor=(1.1, 1.05))
+plt.show()
