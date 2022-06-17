@@ -120,7 +120,26 @@ def lin_reg_loss(theta, X, y):
 
     return loss_f
 
-###################################################################################################
+##############################################################################################################
+def modelOpt(x_train,x_test,v_train,v_test,alpha,beta,n):
+
+    gmm_pdf_z['C'] = alpha*np.identity(10) #αI-covariance-matrix
+    z_train = generate_data_from_gmm(Ntrain,gmm_pdf_z) #Draw Ntrain iid samples of a 10-dim random variable z Gaussian pdf
+    z_test = generate_data_from_gmm(Ntest,gmm_pdf_z)
+    for i in range(Ntrain-1): #Calculate Ntrain scalar values of a new random variable as follows:
+        y_train[i] = (a.T).dot(x_train[i] + z_train[i])+v_train[i] #This is your training dataset that consists of (x, y) pairs
+    for j in range(Ntest-1): #Calculate Ntest scalar values of a new random variable as follows:
+        y_test[i] = (a.T).dot(x_test[j] + z_test[j])+v_test[j] #This is your test dataset that consists of (x, y) pairs
+    
+    theta0 = np.random.randn(x_train.shape[1])
+    mle_model = minimize(nll_loss, theta0, args=(x_train, y_train, beta), tol=1e-6)
+    theta_mle = mle_model.x #ML estimate of parameters - AKA WEIGHT OF MLE
+    p_theta = multivariate_normal.rvs(np.zeros(10), beta*np.identity(n), n) #P(theta) term
+    theta_map = theta_mle + np.log(p_theta) #weight of MAP
+    
+    return theta_map, x_test, y_test
+    
+    ###################################################################################################
 ########################################## Generate Data ##########################################
 #Select an arbitrary non-zero n-dimensional vector a
 a = np.random.rand(10,1)
@@ -187,10 +206,6 @@ print("The best beta value is: ", beta)
 #vary the noise parameter α gradually from very small (e.g.,10e−3trace(Σ)/n) to very large (e.g., 10e3trace(Σ)/n),
 #introducing increasing levels of noise to the input variable, generate new training and test datasets with each α,
 #repeat the process, and analyze the impact of this noise p
-theta0 = np.random.randn(x_train.shape[1])
-mle_model = minimize(nll_loss, theta0, args=(X_valid_k, y_valid_k, bet), tol=1e-6)
-theta_mle = mle_model.x #ML estimate of parameters - AKA WEIGHT OF MLE
-p_theta = multivariate_normal.rvs(0, beta, valid_indices.shape[0]) #P(theta) term
-theta_map = theta_mle + np.log(p_theta) #weight of MAP
-alpha = np.array([10e-3])
-
+alpha = 1
+theta_map, x_test, y_test = modelOpt(x_train,x_test,v_train,v_test,alpha,beta,n)
+lin_reg_loss(theta_map, x_test, y_test)
