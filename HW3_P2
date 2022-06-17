@@ -139,7 +139,7 @@ def modelOpt(x_train,x_test,v_train,v_test,alpha,beta,n):
     
     return theta_map, x_test, y_test
     
-    ###################################################################################################
+###################################################################################################
 ########################################## Generate Data ##########################################
 #Select an arbitrary non-zero n-dimensional vector a
 a = np.random.rand(10,1)
@@ -206,6 +206,6 @@ print("The best beta value is: ", beta)
 #vary the noise parameter α gradually from very small (e.g.,10e−3trace(Σ)/n) to very large (e.g., 10e3trace(Σ)/n),
 #introducing increasing levels of noise to the input variable, generate new training and test datasets with each α,
 #repeat the process, and analyze the impact of this noise p
-alpha = 1
+alpha = 1 #vary this
 theta_map, x_test, y_test = modelOpt(x_train,x_test,v_train,v_test,alpha,beta,n)
-lin_reg_loss(theta_map, x_test, y_test)
+lin_reg_loss(theta_map, x_test, y_test) #MSE 
