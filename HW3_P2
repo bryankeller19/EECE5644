@@ -1,0 +1,196 @@
+#IMPORTS
+import matplotlib.pyplot as plt # For general plotting
+from sys import float_info  # Threshold smallest positive floating value
+import matplotlib.colors as mcol
+import numpy as np
+from numpy import linalg as la
+import pandas as pd
+from scipy.stats import norm, multivariate_normal
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import confusion_matrix
+from sklearn import preprocessing
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchsummary import summary # Utility to visualize PyTorch network and shapes
+from sklearn.preprocessing import PolynomialFeatures # Important new include
+from sklearn.model_selection import KFold # Important new include
+np.set_printoptions(suppress=True)
+from scipy.optimize import minimize
+
+# Set seed to generate reproducible "pseudo-randomness" (handles scipy's "randomness" too)
+np.random.seed(7)
+torch.manual_seed(7)
+
+plt.rc('font', size=22)          # controls default text sizes
+plt.rc('axes', titlesize=18)     # fontsize of the axes title
+plt.rc('axes', labelsize=18)     # fontsize of the x and y labels
+plt.rc('xtick', labelsize=14)    # fontsize of the tick labels
+plt.rc('ytick', labelsize=14)    # fontsize of the tick labels
+plt.rc('legend', fontsize=16)    # legend fontsize
+plt.rc('figure', titlesize=22)   # fontsize of the figure title
+
+#FUNCTIONS
+###################################################################################################
+def generate_data_from_gmm(N, pdf_params):
+    # Determine dimensionality from mixture PDF parameters
+    n = pdf_params['m'].shape[0]
+    # Output samples and labels
+    X = np.zeros([N, n])
+    X = multivariate_normal.rvs(pdf_params['m'], pdf_params['C'], N)
+    
+    return X
+
+##############################################################################################################    
+# Negative Log Likelihood (NLL) loss
+def nll_loss(parameters, X, y, sigma=1):
+    mu_pred = X.dot(parameters)
+    
+    # Compute log-likelihood function, setting mu=0 as we're estimating it
+    log_lld = np.sum(multivariate_normal.pdf(y - mu_pred, 0, sigma))
+    
+    # Return NLL
+    return -log_lld
+
+##############################################################################################################
+def analytical_solution(X, y):
+# Analytical solution is (X^T*X)^-1 * X^T * y 
+    return np.linalg.inv(X.T.dot(X)).dot(X.T).dot(y)
+
+##############################################################################################################
+def kFoldTrain(beta, X_train, y_train, Ntrain, D):
+    
+    #Find certain parameters 
+    K = 5
+    minimum = 1e10
+    ll_set = np.empty((D)) # Allocate space for probability error train error array - percep * 10
+
+    #all_theta_maps = np.empty((beta.shape[0],K))
+    theta0 = np.random.randn(x_train.shape[1])
+    
+    # STEP 1: Partition the dataset into K approximately-equal-sized partitions
+    # Shuffles data before doing the division into folds (not necessary, but a good idea)
+     # Number of folds for CV
+    kf = KFold(n_splits=K, shuffle=True) 
+    
+    # STEP 2: Try number of perceptrons between 1-20 for the hidden layer
+    i = 0
+    for bet in beta:
+        k = 0
+        for train_indices, valid_indices in kf.split(X_train):
+            # Extract the training and validation sets from the K-fold split
+            X_train_k = X_train[train_indices]
+            y_train_k = y_train[train_indices]
+            X_valid_k = X_train[valid_indices]
+            y_valid_k = y_train[valid_indices]
+            
+            # Train model parameters
+            mle_model = minimize(nll_loss, theta0, args=(X_valid_k, y_valid_k, bet), tol=1e-6)
+            theta_mle = mle_model.x #ML estimate of parameters - AKA WEIGHT OF MLE
+            p_theta = multivariate_normal.rvs(0, bet, valid_indices.shape[0]) #P(theta) term
+            #theta_map = theta_mle + np.log(p_theta) #weight of MAP
+
+            #Record NLL over each fold and theta map
+            ll_set += theta_mle
+            #all_theta_maps[i,k] = theta_map
+            k += 1
+        if np.sum(ll_set/5) < minimum:
+            avg_nll_per_beta_min = ll_set/5 #gets average negative log likelihood per beta
+            minimum = np.sum(ll_set/5)
+            best_beta = bet
+        i += 1   
+        ll_set = np.empty((D))
+        #print(np.min(avg_nll_per_beta_min))
+        #print(bet)
+    # STEP 3: Compute the lowest Error for that model
+    max_ll = np.min(avg_nll_per_beta_min)
+    
+    
+    return max_ll, best_beta#, prior
+
+##############################################################################################################
+# Mean Squared Error (MSE) loss
+def lin_reg_loss(theta, X, y):
+    # Linear regression model X * theta
+    predictions = X.dot(theta)
+    # Residual error (X * theta) - y
+    error = predictions - y
+    # Loss function is MSE
+    loss_f = np.mean(error**2)
+
+    return loss_f
+
+###################################################################################################
+########################################## Generate Data ##########################################
+#Select an arbitrary non-zero n-dimensional vector a
+a = np.random.rand(10,1)
+n = 10 #dimensions
+Ntrain = 50
+Ntest = 1000
+
+#Generating Training Dataset / Test Set
+gmm_pdf_x = {}
+gmm_pdf_x['m'] = np.array([-3.1, -1.4, 2.1, 4.5, 1.2, -1.2, -3.5, -2.0, 3.1, 3.2]) #Pick an arbitrary Gaussian with nonzero-mean µ
+gmm_pdf_x['C'] = 2*np.ones((10,10))-2*np.identity(10) #non-diagonal covariance matrix
+x_train = generate_data_from_gmm(Ntrain,gmm_pdf_x) #Draw Ntrain iid samples of 10-dim samples of x from this Gaussian pdf
+x_test = generate_data_from_gmm(Ntest,gmm_pdf_x)
+
+gmm_pdf_z = {}
+gmm_pdf_z['m'] = np.zeros(10) #0-mean
+alpha = 1
+gmm_pdf_z['C'] = alpha*np.identity(10) #αI-covariance-matrix
+z_train = generate_data_from_gmm(Ntrain,gmm_pdf_z) #Draw Ntrain iid samples of a 10-dim random variable z Gaussian pdf
+z_test = generate_data_from_gmm(Ntest,gmm_pdf_z)
+
+gmm_pdf_v = {}
+gmm_pdf_v['m'] = 0 #0-mean
+gmm_pdf_v['C'] = 1 #unit-variance 
+v_train = norm.rvs(gmm_pdf_v['m'], gmm_pdf_v['C'], Ntrain) #Draw Ntrain iid samples of a scalar random variable v
+v_test = norm.rvs(gmm_pdf_v['m'], gmm_pdf_v['C'], Ntest)
+
+y_train = np.empty((Ntrain))
+y_test = np.empty((Ntest))
+#train_dataset = np.empty((Ntrain,n,Ntrain))
+#test_dataset = np.empty((Ntest,n,Ntest))
+
+for i in range(Ntrain-1): #Calculate Ntrain scalar values of a new random variable as follows:
+    y_train[i] = (a.T).dot(x_train[i] + z_train[i])+v_train[i] #This is your training dataset that consists of (x, y) pairs
+
+for j in range(Ntest-1): #Calculate Ntest scalar values of a new random variable as follows:
+    y_test[i] = (a.T).dot(x_test[j] + z_test[j])+v_test[j] #This is your test dataset that consists of (x, y) pairs
+
+####################################################################################################
+################################### Model Parameter Estimation ####################################   
+#We think that the relationship between (x, y) pairs is linear y = w^T x + w0 + v and v
+#is an additive white Gaussian noise (with zero-mean and unit-variance). We are unaware of the presence
+#of the noise term z in the true generative process. We think that this process also has linear model
+#parameters close to zero, so we use a 0-mean and βI-covariance matrix Gaussian pdf as a prior for
+#the model parameters w (which contain w0). We will use MAP parameter estimation to determine the optimal
+#weights for this model using the training data
+################################## Hyper-Parameter Optimization ###################################  
+#The prior for the n + 1-dimensional weight vector in the model has a scalar parameter β that needs to be selected
+#Use 5-fold cross-validation on the training set to select this parameter. As your cross-validation objective function,
+#use max-log-likelihood of the validation data averaged over the 5 partitions.
+#Use the MAP parameter estimation solution in the process with candidate hyper-parameter values
+#Q2.2
+beta_arr = np.array([1e-6,2e-6,3e-6,4e-6,5e-6,6e-6,7e-6,8e-6,9e-6,10e-6])
+max_ll, beta = kFoldTrain(beta_arr, x_train, y_train, Ntrain, n)
+print("The max-log-likelihood of the validation data averaged over the 5 partitions: ", max_ll)
+print("The best beta value is: ", beta)
+
+
+####################################################################################################
+######################################## Model Optimization ######################################## 
+#Once the best hyper-parameter value is identified, use the entire training dataset to optimize the
+#model parameters with MAP parameter estimation that specifically uses this best hyper-parameter selection.
+#Evaluate the ‘-2 times log likelihood’ of the test data with the trained model. While keeping a, µ, Σ constant,
+#vary the noise parameter α gradually from very small (e.g.,10e−3trace(Σ)/n) to very large (e.g., 10e3trace(Σ)/n),
+#introducing increasing levels of noise to the input variable, generate new training and test datasets with each α,
+#repeat the process, and analyze the impact of this noise p
+theta0 = np.random.randn(x_train.shape[1])
+mle_model = minimize(nll_loss, theta0, args=(X_valid_k, y_valid_k, bet), tol=1e-6)
+theta_mle = mle_model.x #ML estimate of parameters - AKA WEIGHT OF MLE
+p_theta = multivariate_normal.rvs(0, beta, valid_indices.shape[0]) #P(theta) term
+theta_map = theta_mle + np.log(p_theta) #weight of MAP
+alpha = np.array([10e-3])
+
